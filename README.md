@@ -215,6 +215,3 @@ python Gather-and-Aggregate/finetune/train.py \
 - 调整层替换策略：修改/传入 `--layers`，或扩展 `models.apply_replacements`；
  
 
-## 许可与致谢
-- 教师与学生模型遵循各自上游许可；
-- 数据集使用遵循其各自授权条款；
