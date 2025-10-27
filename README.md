@@ -69,6 +69,10 @@ python Gather-and-Aggregate/finetune/train.py \
   --max_steps 1000
 ```
 
+```bash
+nohup setsid env HF_DATASETS_CACHE=/home/liyijia/LinearAttaetion/data/fineweb-cc-main-2014-49 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True WANDB_API_KEY='e11e417d78f5ac9822301ec6f0e1d0b71d637aa2' WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0,1,2,3,4 NCCL_IB_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_P2P_DISABLE=1 NCCL_ALGO=Ring NCCL_PROTO=Simple NCCL_MIN_NCHANNELS=1 NCCL_MAX_NCHANNELS=1 TORCH_NCCL_ASYNC_ERROR_HANDLING=1 TORCH_NCCL_BLOCKING_WAIT=1 TORCH_DISTRIBUTED_DEBUG=DETAIL OMP_NUM_THREADS=4 torchrun --standalone --nproc_per_node=4 --master_port=29543 Gather-and-Aggregate/Hybrid_distill/train_gpus.py --dtype bfloat16 --layers 14 16 17 30 --batch_size 2 --epochs 1 --max_steps 10000 --seq_length 1024 --freeze_mlp --freeze_replaced_layers --no_dataset_streaming --local_files_only --save_interval 1000 --skip_stage2 --wandb --wandb_project llamba-distill --wandb_run_name 1teacher_4students1 --output_dir /data/yijia/checkpoints_gpus > logs/train_gpus.log 2>&1 &
+```
+
 常用变体：
 - 仅做最小验证（更快收敛日志）：`--max_steps 50 --second_dataset_name ""`
 - 关闭流式加载（小数据集场景）：`--no_dataset_streaming`
