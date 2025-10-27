@@ -2,7 +2,7 @@ import logging
 import os
 from typing import Iterable, Optional
 
-
+'''
 UNSUPPORTED_GEN_KW = {
     "stopping_criteria",
     "synced_gpus",
@@ -24,8 +24,8 @@ UNSUPPORTED_GEN_KW = {
     "length_penalty",
     "no_repeat_ngram_size",
 }
-
-
+'''
+UNSUPPORTED_GEN_KW={}
 def configure_environment():
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.environ.setdefault("MAMBA_TRITON_AUTOTUNE", "0")

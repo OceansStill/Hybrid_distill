@@ -79,6 +79,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=1.0)
+    '''
+    parser.add_argument(
+        "--kl_weight",
+        type=float,
+        default=1.0,
+        help="KL(teacher || student) 的损失权重；设为 0 可跳过教师前向与通信。",
+    )
+    parser.add_argument(
+        "--ce_weight",
+        type=float,
+        default=1.0,
+        help="交叉熵（硬标签）损失权重；设为 0 可仅使用教师软目标。",
+    )
+    '''
     parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--save_interval", type=int, default=1000000)
     parser.add_argument("--output_dir", type=str, default="distilled_llamba")
