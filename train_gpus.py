@@ -472,7 +472,8 @@ def main():
 
             # === 对齐 vocab / 温度
             s_logits_raw = s_logits_full[..., :min_vocab].to(dtype=loss_dtype)
-            s_logits = (s_logits_raw / T) if T != 1.0 else s_logits_raw
+            #s_logits = (s_logits_raw / T) if T != 1.0 else s_logits_raw
+            s_logits=s_logits_raw
             if t_logits is None:
                 # 若无需 KD，构造占位张量以便传参（不会被用到，因为 kl_weight==0）
                 t_logits = s_logits_raw.new_zeros((s_logits_raw.size(0), s_logits_raw.size(1), s_logits_raw.size(2)))
@@ -482,7 +483,7 @@ def main():
             kl_w = float(getattr(args, "kl_weight", 1.0))
             total_loss, kl_loss, ce_loss = _compute_distill_loss(
                 s_logits,
-                t_logits / T if T != 1.0 else t_logits,
+                t_logits, #/ T if T != 1.0 else t_logits,
                 s_logits_raw,
                 labels[:, :seq_len],
                 loss_mask[:, :seq_len],
