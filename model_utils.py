@@ -1,7 +1,7 @@
 import copy
 import os
 import sys
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 import torch
 from torch import nn
@@ -87,31 +87,88 @@ def revert_replacements(model, originals: Dict[int, nn.Module]):
 
 
 def transfer_teacher_weights(student, teacher, layer_count: Optional[int] = None):
-    student.backbone.embedding.weight.data.copy_(teacher.backbone.embed_tokens.weight.data)
-    student.backbone.final_layernorm.weight.data.copy_(teacher.backbone.norm.weight.data)
-
-    if hasattr(student.lm_head, "weight"):
-        student.lm_head.weight.data.copy_(teacher.lm_head.weight.data)
-    if (
-        hasattr(student.lm_head, "bias")
-        and hasattr(teacher.lm_head, "bias")
-        and student.lm_head.bias is not None
-        and teacher.lm_head.bias is not None
-    ):
-        student.lm_head.bias.data.copy_(teacher.lm_head.bias.data)
-
-    total_layers = layer_count or min(len(student.backbone.layers), len(teacher.backbone.layers))
-    for idx in range(total_layers):
-        student_layer = student.backbone.layers[idx]
-        teacher_layer = teacher.backbone.layers[idx]
-        if hasattr(student_layer, "input_layernorm") and hasattr(teacher_layer, "input_layernorm"):
-            student_layer.input_layernorm.weight.data.copy_(teacher_layer.input_layernorm.weight.data)
-        if hasattr(student_layer, "post_attention_layernorm") and hasattr(teacher_layer, "post_attention_layernorm"):
-            student_layer.post_attention_layernorm.weight.data.copy_(teacher_layer.post_attention_layernorm.weight.data)
-        if hasattr(student_layer, "mlp") and hasattr(teacher_layer, "mlp"):
-            copy_module_parameters(student_layer.mlp, teacher_layer.mlp)
+    """
+    保留兼容接口：当前蒸馏流程仅通过 apply_replacements 深拷贝指定层，
+    不再额外复制 embedding / lm_head 等权重。
+    """
+    return
 
 
 def copy_module_parameters(target: nn.Module, source: nn.Module):
     for target_param, source_param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(source_param.data)
+
+
+def get_first_attr(module, names: Iterable[str]):
+    for name in names:
+        if hasattr(module, name):
+            return getattr(module, name)
+    return None
+
+
+def get_backbone(model) -> Optional[nn.Module]:
+    return get_first_attr(model, ("backbone", "model"))
+
+
+def get_embedding_module(model) -> Optional[nn.Module]:
+    backbone = get_backbone(model)
+    if backbone is None:
+        return None
+    return get_first_attr(backbone, ("embedding", "embed_tokens"))
+
+
+def get_layers(model) -> List[nn.Module]:
+    backbone = get_backbone(model)
+    if backbone is None:
+        return []
+    return list(getattr(backbone, "layers", []))
+
+
+def filter_layer_indices(indices: Optional[Iterable[int]]) -> List[int]:
+    if indices is None:
+        return []
+    return [idx for idx in indices if isinstance(idx, int) and idx >= 0]
+
+
+def freeze_student_mlps(student: nn.Module) -> int:
+    frozen = 0
+    for layer in get_layers(student):
+        mlp = getattr(layer, "mlp", None)
+        if mlp is None:
+            continue
+        for param in mlp.parameters():
+            if param.requires_grad:
+                param.requires_grad_(False)
+                frozen += param.numel()
+    return frozen
+
+
+def freeze_student_layers(student: nn.Module, indices: Iterable[int]) -> int:
+    layers = get_layers(student)
+    frozen = 0
+    for idx in indices:
+        if 0 <= idx < len(layers):
+            layer = layers[idx]
+            for param in layer.parameters():
+                if param.requires_grad:
+                    param.requires_grad_(False)
+                    frozen += param.numel()
+    return frozen
+
+
+def count_layer_parameters(student: nn.Module, indices: Iterable[int]) -> Dict[str, int]:
+    layers = get_layers(student)
+    total = 0
+    mlp = 0
+    for idx in indices:
+        if 0 <= idx < len(layers):
+            layer = layers[idx]
+            total += sum(p.numel() for p in layer.parameters())
+            mlp_module = getattr(layer, "mlp", None)
+            if mlp_module is not None:
+                mlp += sum(p.numel() for p in mlp_module.parameters())
+    return {
+        "total": total,
+        "mlp": mlp,
+        "non_mlp": max(total - mlp, 0),
+    }
