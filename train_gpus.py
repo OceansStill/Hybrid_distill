@@ -295,7 +295,6 @@ def main():
 
     def fetch_teacher_logits_distributed(
         inputs_local: torch.Tensor,
-        attn_local: Optional[torch.Tensor],
         seq_len: int,
         need_teacher: bool,
     ) -> Optional[torch.Tensor]:
@@ -307,17 +306,9 @@ def main():
         gather_inputs = [torch.empty_like(inputs_local, device=student_device) for _ in range(world_size)]
         dist.all_gather(gather_inputs, inputs_local.to(student_device, non_blocking=True))
 
-        gather_attention = None
-        if attn_local is not None:
-            gather_attention = [torch.empty_like(attn_local, device=student_device) for _ in range(world_size)]
-            dist.all_gather(gather_attention, attn_local.to(student_device, non_blocking=True))
-
         if is_main:
             big_inputs = torch.cat(gather_inputs, dim=0).to(teacher_device, non_blocking=True)
             teacher_kwargs = {"input_ids": big_inputs}
-            if gather_attention is not None:
-                big_attention = torch.cat(gather_attention, dim=0).to(teacher_device, non_blocking=True)
-                teacher_kwargs["attention_mask"] = big_attention
 
             with torch.no_grad():
                 teacher_out = teacher(**teacher_kwargs)
@@ -431,7 +422,6 @@ def main():
                 break
 
             batch_input = batch["input_ids"]
-            attention_mask_cpu = batch.get("attention_mask")
             loss_mask_cpu = batch.get("loss_mask")
 
             input_ids_cpu = batch_input[:, :-1].contiguous()
@@ -440,15 +430,7 @@ def main():
             if loss_mask_cpu is not None:
                 loss_mask_cpu = loss_mask_cpu[:, 1:].contiguous()
             else:
-                if attention_mask_cpu is not None:
-                    loss_mask_cpu = attention_mask_cpu[:, 1:].contiguous()
-                else:
-                    loss_mask_cpu = torch.ones_like(labels_cpu, dtype=torch.long)
-
-            if attention_mask_cpu is not None:
-                attention_mask_trimmed = attention_mask_cpu[:, :-1].contiguous()
-            else:
-                attention_mask_trimmed = None
+                loss_mask_cpu = torch.ones_like(labels_cpu, dtype=torch.long)
 
             # Track effective tokens for logging / throughput accounting (mask excludes padding).
             tokens_accum += float(loss_mask_cpu.sum())
@@ -458,15 +440,12 @@ def main():
             loss_mask = loss_mask_cpu.to(student_device, non_blocking=True)
 
             student_kwargs = {"input_ids": inputs_student}
-            if attention_mask_trimmed is not None:
-                student_kwargs["attention_mask"] = attention_mask_trimmed.to(student_device, non_blocking=True)
             student_out = student(**student_kwargs)
             student_logits_full = student_out.logits if hasattr(student_out, "logits") else student_out
 
             seq_len = inputs_student.size(1)
             teacher_logits = fetch_teacher_logits_distributed(
                 input_ids_cpu,
-                attention_mask_trimmed if attention_mask_trimmed is not None else None,
                 seq_len,
                 need_teacher_kd,
             )

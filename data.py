@@ -8,13 +8,14 @@ from datasets import load_dataset
 
 class PackedTextDataset(IterableDataset):
     """
-    将文本数据打包成定长序列的 IterableDataset。
+    将文本数据打包成定长序列的 IterableDataset，产出包含 `input_ids` 与 `loss_mask` 的样本。
 
     设计思想
     --------
     - 适合大规模文本数据，尤其是 streaming 模式（无需一次性载入全部样本）。
     - 每次迭代读取一条文本，分词后 append 到缓存 buffer。
     - 当 buffer 长度 ≥ seq_length + 1 时，截断一段返回（含下一个 token 作为标签）。
+    - 对不足长度的样本使用 pad_token（若缺失则回退到 eos_token）填充，并在 loss_mask 中标记有效位置。
 
     参数
     ----
@@ -120,13 +121,12 @@ class PackedTextDataset(IterableDataset):
             if length < max_len:
                 tokens = tokens + [pad_token_id] * (max_len - length)
 
-            mask = torch.zeros(max_len, dtype=torch.long)
-            mask[:length] = 1
+            loss_mask = torch.zeros(max_len, dtype=torch.long)
+            loss_mask[:length] = 1
 
             yield {
                 "input_ids": torch.tensor(tokens, dtype=torch.long),
-                "attention_mask": mask.clone(),
-                "loss_mask": mask.clone(),
+                "loss_mask": loss_mask,
             }
 
 
@@ -151,7 +151,7 @@ def build_dataloader(
     返回 DataLoader 特性
     --------------------
     - dataset: PackedTextDataset（IterableDataset），无需 `sampler`。
-    - batch_size: 按输入 batch_size，`collate_fn` 会 stack 成 [B, seq_length+1]。
+    - batch_size: 按输入 batch_size，`collate_fn` 会将 `input_ids` 与 `loss_mask` stack 成 [B, seq_length+1]。
     - pin_memory=True: 提升 GPU 传输性能。
 
     说明
@@ -176,13 +176,8 @@ def build_dataloader(
 
     def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         input_ids = torch.stack([item["input_ids"] for item in batch])
-        attention_mask = torch.stack([item["attention_mask"] for item in batch])
         loss_mask = torch.stack([item["loss_mask"] for item in batch])
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "loss_mask": loss_mask,
-        }
+        return {"input_ids": input_ids, "loss_mask": loss_mask}
 
     return DataLoader(
         dataset,
