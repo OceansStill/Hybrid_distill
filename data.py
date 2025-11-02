@@ -92,11 +92,12 @@ class PackedTextDataset(IterableDataset):
         self._column_names: Optional[List[str]] = None
 
     def __iter__(self) -> Iterable[torch.Tensor]:
-        """
-        返回一个迭代器，持续输出形状为 [seq_length + 1] 的 long tensor。
-        该 tensor 包含输入 + 下一个 token，用于 causal LM 训练。
-        """
-        buffer: List[int] = []
+        pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+
+        max_len = self.seq_length + 1
+
         for sample in self.dataset:
             if self._column_names is None:
                 self._column_names = list(sample.keys())
@@ -109,14 +110,24 @@ class PackedTextDataset(IterableDataset):
 
             tokens = self.tokenizer(text, add_special_tokens=False)["input_ids"]
             tokens.append(self.tokenizer.eos_token_id)
-            buffer.extend(tokens)
+            if not tokens:
+                continue
 
-            # 当缓存中可切出 seq_length+1 个 token 时，产出一次样本
-            # 注意：每次切片后从 buffer 移除对应片段，确保顺序衔接
-            while len(buffer) >= self.seq_length + 1:
-                chunk = buffer[: self.seq_length + 1]
-                buffer = buffer[self.seq_length + 1 :]
-                yield torch.tensor(chunk, dtype=torch.long)
+            if len(tokens) > max_len:
+                tokens = tokens[:max_len]
+
+            length = len(tokens)
+            if length < max_len:
+                tokens = tokens + [pad_token_id] * (max_len - length)
+
+            mask = torch.zeros(max_len, dtype=torch.long)
+            mask[:length] = 1
+
+            yield {
+                "input_ids": torch.tensor(tokens, dtype=torch.long),
+                "attention_mask": mask.clone(),
+                "loss_mask": mask.clone(),
+            }
 
 
 def build_dataloader(
@@ -163,12 +174,15 @@ def build_dataloader(
         dataset_kwargs=dataset_kwargs,
     )
 
-    def collate_fn(batch: List[torch.Tensor]) -> torch.Tensor:
-        """
-        将若干 [seq_length+1] 的 tensor 堆叠为 [B, seq_length+1]。
-        由于 PackedTextDataset 已保证每个样本长度一致，可直接 stack。
-        """
-        return torch.stack(batch)
+    def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        input_ids = torch.stack([item["input_ids"] for item in batch])
+        attention_mask = torch.stack([item["attention_mask"] for item in batch])
+        loss_mask = torch.stack([item["loss_mask"] for item in batch])
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "loss_mask": loss_mask,
+        }
 
     return DataLoader(
         dataset,

@@ -87,12 +87,16 @@ def main() -> None:
     )
     print("=" * 80)
 
-    for idx, chunk in enumerate(itertools.islice(iterator, args.samples)):
-        chunk = chunk.clone().detach()
-        input_tokens = chunk[:-1]
-        target_token = chunk[-1].unsqueeze(0)
+    for idx, sample in enumerate(itertools.islice(iterator, args.samples)):
+        input_ids = sample["input_ids"].clone().detach()
+        loss_mask = sample["loss_mask"].clone().detach()
+        valid_len = int(loss_mask.sum().item())
+        valid_len = max(valid_len, 1)
+        tokens = input_ids[:valid_len]
+        input_tokens = tokens[:-1]
+        target_token = tokens[-1].unsqueeze(0)
         print(f"[Sample {idx:02d}]")
-        print(f" - token ids: {chunk.tolist()}")
+        print(f" - token ids (valid): {tokens.tolist()}")
         print(f" - input ids ({len(input_tokens)}): {input_tokens.tolist()}")
         print(f" - target id: {target_token.item()}")
         print(f" - input text: {decode_tokens(tokenizer, input_tokens)}")

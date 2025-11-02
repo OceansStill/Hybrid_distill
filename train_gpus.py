@@ -279,13 +279,19 @@ def main():
     dist.broadcast(vocab_tensor, src=0)
     teacher_vocab = int(vocab_tensor.item())
     student_vocab = _get_student_vocab()
-    min_vocab = min(student_vocab if student_vocab is not None else teacher_vocab, teacher_vocab)
+    if student_vocab is not None and student_vocab != teacher_vocab:
+        raise ValueError(
+            f"学生词表大小({student_vocab}) 与老师词表({teacher_vocab}) 不一致，"
+            "请检查模型/词表配置。"
+        )
+    vocab_size = int(teacher_vocab)
 
     student_embedding = get_embedding_module(model_to_save)
     embedding_dtype = getattr(getattr(student_embedding, "weight", None), "dtype", torch.float32)
     loss_dtype = torch_dtype
     if is_main:
-        logger.info(f"学生 embedding dtype={embedding_dtype}；min_vocab={min_vocab}；loss_dtype={loss_dtype}。")
+        logger.info(f"teacher_vocab={teacher_vocab}；student_vocab={student_vocab}")
+        logger.info(f"学生 embedding dtype={embedding_dtype}；vocab_size={vocab_size}；loss_dtype={loss_dtype}。")
 
     def fetch_teacher_logits_distributed(
         inputs_local: torch.Tensor,
@@ -318,14 +324,11 @@ def main():
                 teacher_logits_all = (
                     teacher_out.logits if hasattr(teacher_out, "logits") else teacher_out
                 ).to(dtype=loss_dtype)
-                if teacher_logits_all.size(-1) > min_vocab:
-                    teacher_logits_all = teacher_logits_all[..., :min_vocab]
-
             slices = torch.chunk(teacher_logits_all, world_size, dim=0)
         else:
             slices = None
 
-        recv_logits = torch.empty((batch_local, seq_len, min_vocab), dtype=loss_dtype, device=student_device)
+        recv_logits = torch.empty((batch_local, seq_len, vocab_size), dtype=loss_dtype, device=student_device)
         tmp_buf = torch.empty_like(recv_logits)
         for r in range(world_size):
             if is_main:
@@ -347,8 +350,7 @@ def main():
 
     need_teacher_kd = float(getattr(args, "kl_weight", 0.0)) > 0.0
     optimizer_steps_done = global_step // max(grad_accum, 1)
-
-    first_batch_logged = False
+    dataset_previewed = False
 
     for epoch in range(epochs):
         if is_main:
@@ -370,6 +372,56 @@ def main():
             dataset_kwargs=dataset_kwargs,
         )
 
+        if is_main and not dataset_previewed:
+            try:
+                preview_loader = build_dataloader(
+                    dataset_name=args.dataset_name,
+                    split=args.dataset_split,
+                    tokenizer=tokenizer,
+                    seq_length=args.seq_length,
+                    text_field=args.dataset_text_field,
+                    batch_size=1,
+                    streaming=not getattr(args, "no_dataset_streaming", False),
+                    shuffle_buffer=args.shuffle_buffer,
+                    revision=args.dataset_revision,
+                    local_files_only=args.local_files_only,
+                    world_size=1,
+                    rank=0,
+                    dataset_kwargs=dataset_kwargs,
+                )
+                preview_batch = next(iter(preview_loader))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[preview] 获取样本失败：{exc}")
+            else:
+                eos_id = tokenizer.eos_token_id
+                preview_input = preview_batch["input_ids"][0]
+                preview_mask = preview_batch["loss_mask"][0]
+                valid_len = int(preview_mask.sum().item())
+                valid_len = max(valid_len, 1)
+                tokens = preview_input[:valid_len].tolist()
+                eos_positions = [idx for idx, tid in enumerate(tokens) if tid == eos_id]
+                input_tokens = tokens[:-1] if len(tokens) > 1 else tokens
+                target_token = tokens[-1]
+                logger.info(
+                    "[preview] total_tokens=%d eos_token_id=%s eos_count=%d eos_positions=%s",
+                    valid_len,
+                    eos_id,
+                    len(eos_positions),
+                    eos_positions[:10],
+                )
+                logger.info("[preview] raw_input_ids=%s", tokens)
+                logger.info(
+                    "[preview] input_text=%r",
+                    tokenizer.decode(input_tokens, skip_special_tokens=False),
+                )
+                logger.info(
+                    "[preview] target_token_id=%d target_token_text=%r",
+                    target_token,
+                    tokenizer.decode([target_token], skip_special_tokens=False),
+                )
+            finally:
+                dataset_previewed = True
+
         if is_main and epoch == 0:
             logger.info(f"DataLoader 构建完成，数据集 {args.dataset_name}，分片 rank={rank}。")
             logger.info("注意：请确保 DataLoader(drop_last=True)，以保证各 rank 每步 batch 等长。")
@@ -378,25 +430,25 @@ def main():
             if max_optimizer_steps and optimizer_steps_done >= max_optimizer_steps:
                 break
 
-            if is_main and not first_batch_logged:
-                for sample_idx in range(min(3, batch.size(0))):
-                    sample_tokens = batch[sample_idx].tolist()
-                    sample_input = sample_tokens[:-1]
-                    sample_target = sample_tokens[-1]
-                    logger.info(
-                        "[inspect] sample %d raw_ids=%s input_text=%r target_token=%r",
-                        sample_idx,
-                        sample_tokens,
-                        tokenizer.decode(sample_input, skip_special_tokens=False),
-                        tokenizer.decode([sample_target], skip_special_tokens=False),
-                    )
-                first_batch_logged = True
+            batch_input = batch["input_ids"]
+            attention_mask_cpu = batch.get("attention_mask")
+            loss_mask_cpu = batch.get("loss_mask")
 
-            # 当前数据集只返回 packed token 序列 [B, seq_length+1]
-            input_ids_cpu = batch[:, :-1].contiguous()
-            labels_cpu = batch[:, 1:].contiguous()
-            loss_mask_cpu = torch.ones_like(labels_cpu, dtype=torch.long)
-            attention_mask_cpu = None
+            input_ids_cpu = batch_input[:, :-1].contiguous()
+            labels_cpu = batch_input[:, 1:].contiguous()
+
+            if loss_mask_cpu is not None:
+                loss_mask_cpu = loss_mask_cpu[:, 1:].contiguous()
+            else:
+                if attention_mask_cpu is not None:
+                    loss_mask_cpu = attention_mask_cpu[:, 1:].contiguous()
+                else:
+                    loss_mask_cpu = torch.ones_like(labels_cpu, dtype=torch.long)
+
+            if attention_mask_cpu is not None:
+                attention_mask_trimmed = attention_mask_cpu[:, :-1].contiguous()
+            else:
+                attention_mask_trimmed = None
 
             # Track effective tokens for logging / throughput accounting (mask excludes padding).
             tokens_accum += float(loss_mask_cpu.sum())
@@ -406,20 +458,20 @@ def main():
             loss_mask = loss_mask_cpu.to(student_device, non_blocking=True)
 
             student_kwargs = {"input_ids": inputs_student}
-            if attention_mask_cpu is not None:
-                student_kwargs["attention_mask"] = attention_mask_cpu[:, :-1].to(student_device, non_blocking=True)
+            if attention_mask_trimmed is not None:
+                student_kwargs["attention_mask"] = attention_mask_trimmed.to(student_device, non_blocking=True)
             student_out = student(**student_kwargs)
             student_logits_full = student_out.logits if hasattr(student_out, "logits") else student_out
 
             seq_len = inputs_student.size(1)
             teacher_logits = fetch_teacher_logits_distributed(
                 input_ids_cpu,
-                attention_mask_cpu[:, :-1] if attention_mask_cpu is not None else None,
+                attention_mask_trimmed if attention_mask_trimmed is not None else None,
                 seq_len,
                 need_teacher_kd,
             )
 
-            student_logits_raw = student_logits_full[..., :min_vocab].to(dtype=loss_dtype)
+            student_logits_raw = student_logits_full.to(dtype=loss_dtype)
             student_logits = student_logits_raw
             if teacher_logits is None:
                 teacher_logits = student_logits_raw.new_zeros(student_logits_raw.shape)
