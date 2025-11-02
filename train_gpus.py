@@ -48,7 +48,6 @@ from training_utils import (
     ddp_init,
     get_learning_rate,
     model_fingerprint,
-    split_batch,
 )
 from utils import configure_environment, init_wandb, save_checkpoint, setup_logger
 
@@ -349,6 +348,8 @@ def main():
     need_teacher_kd = float(getattr(args, "kl_weight", 0.0)) > 0.0
     optimizer_steps_done = global_step // max(grad_accum, 1)
 
+    first_batch_logged = False
+
     for epoch in range(epochs):
         if is_main:
             logger.info(f"=== Epoch {epoch + 1}/{epochs} 开始 ===")
@@ -377,25 +378,25 @@ def main():
             if max_optimizer_steps and optimizer_steps_done >= max_optimizer_steps:
                 break
 
-            input_ids_cpu, attention_mask_cpu, labels_cpu, loss_mask_cpu = split_batch(batch)
-            # Step-wise preprocessing:
-            # 1. split_batch may return only packed tokens; synthesize shifted labels/masks when absent.
-            # 2. Trim the last token from inputs so each step predicts the next token (teacher forcing).
-            # 3. Build attention/loss masks that mark valid prediction positions for CE / KL.
-            # 4. Move tensors onto the local GPU before the forward pass.
-            if labels_cpu is None:
-                labels_cpu = input_ids_cpu[:, 1:].contiguous()
-            else:
-                labels_cpu = labels_cpu.contiguous()
-            input_ids_cpu = input_ids_cpu[:, :-1].contiguous()
-            if loss_mask_cpu is None:
-                loss_mask_cpu = (
-                    attention_mask_cpu[:, 1:].contiguous()
-                    if attention_mask_cpu is not None
-                    else torch.ones_like(labels_cpu, dtype=torch.long)
-                )
-            else:
-                loss_mask_cpu = loss_mask_cpu.contiguous()
+            if is_main and not first_batch_logged:
+                for sample_idx in range(min(3, batch.size(0))):
+                    sample_tokens = batch[sample_idx].tolist()
+                    sample_input = sample_tokens[:-1]
+                    sample_target = sample_tokens[-1]
+                    logger.info(
+                        "[inspect] sample %d raw_ids=%s input_text=%r target_token=%r",
+                        sample_idx,
+                        sample_tokens,
+                        tokenizer.decode(sample_input, skip_special_tokens=False),
+                        tokenizer.decode([sample_target], skip_special_tokens=False),
+                    )
+                first_batch_logged = True
+
+            # 当前数据集只返回 packed token 序列 [B, seq_length+1]
+            input_ids_cpu = batch[:, :-1].contiguous()
+            labels_cpu = batch[:, 1:].contiguous()
+            loss_mask_cpu = torch.ones_like(labels_cpu, dtype=torch.long)
+            attention_mask_cpu = None
 
             # Track effective tokens for logging / throughput accounting (mask excludes padding).
             tokens_accum += float(loss_mask_cpu.sum())
