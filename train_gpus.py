@@ -335,7 +335,7 @@ def main():
     save_interval = int(getattr(args, "save_interval", 0))
 
     tokens_accum = 0.0
-    loss_accum = 0.0
+    loss_log_accum = 0.0
     step_last_log = None
     start_time = time.time()
 
@@ -417,6 +417,8 @@ def main():
             logger.info(f"DataLoader 构建完成，数据集 {args.dataset_name}，分片 rank={rank}。")
             logger.info("注意：请确保 DataLoader(drop_last=True)，以保证各 rank 每步 batch 等长。")
 
+        loss_log_accum = 0.0
+
         for batch in dataloader:
             if max_optimizer_steps and optimizer_steps_done >= max_optimizer_steps:
                 break
@@ -468,6 +470,20 @@ def main():
                 temperature,
             )
 
+            loss_vector = torch.stack(
+                (
+                    total_loss.detach(),
+                    kl_loss.detach(),
+                    ce_loss.detach(),
+                )
+            ).to(student_device, dtype=torch.float32)
+            dist.all_reduce(loss_vector, op=dist.ReduceOp.SUM)
+            loss_vector /= max(world_size, 1)
+            total_loss_global = float(loss_vector[0].item())
+            kl_loss_global = float(loss_vector[1].item())
+            ce_loss_global = float(loss_vector[2].item())
+            loss_log_accum += total_loss_global
+
             micro_loss = total_loss / grad_accum
             if (global_step % grad_accum) != (grad_accum - 1):
                 with student.no_sync():
@@ -481,8 +497,8 @@ def main():
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
-                step_loss = (loss_accum + float(total_loss.detach().cpu())) / float(grad_accum)
-                loss_accum = 0.0
+                step_loss = loss_log_accum / float(max(grad_accum, 1))
+                loss_log_accum = 0.0
 
                 if is_main:
                     now = time.time()
@@ -491,7 +507,7 @@ def main():
                     lr = get_learning_rate(scheduler, optimizer)
                     msg = (
                         f"[train] micro_step {global_step+1} (opt {optimizer_steps_done}) | "
-                        f"loss {step_loss:.6e} | kl {float(kl_loss):.6e} | ce {float(ce_loss):.6e} | lr {lr:.2e}"
+                        f"loss {step_loss:.6e} | kl {kl_loss_global:.6e} | ce {ce_loss_global:.6e} | lr {lr:.2e}"
                     )
                     if step_time is not None:
                         msg += f" | step_time {step_time:.2f}s"
@@ -500,8 +516,8 @@ def main():
                         wandb_run.log(
                             {
                                 "train/loss": float(step_loss),
-                                "train/kl": float(kl_loss),
-                                "train/ce": float(ce_loss),
+                                "train/kl": float(kl_loss_global),
+                                "train/ce": float(ce_loss_global),
                                 "train/lr": float(lr),
                                 "train/tokens": float(tokens_accum),
                                 "train/optimizer_step": optimizer_steps_done,
@@ -510,8 +526,6 @@ def main():
                             step=optimizer_steps_done,
                         )
                 tokens_accum = 0.0
-            else:
-                loss_accum += float(total_loss.detach().cpu())
 
             if save_interval > 0 and ((global_step + 1) % save_interval == 0) and is_main:
                 save_checkpoint(model_to_save, tokenizer, args.output_dir, global_step + 1)
