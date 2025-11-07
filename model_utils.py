@@ -52,6 +52,8 @@ def get_student_model(
 ):
     # 延迟导入，避免在仅查看 --help 时引入 mamba 依赖
     from models.llamba import LlambaLMHeadModel  # noqa: WPS433
+    import inspect
+    print(f"LlambaLMHeadModel 来源: {inspect.getfile(LlambaLMHeadModel)}")
     student = LlambaLMHeadModel.from_pretrained(
         "goombalab/Llamba-8B-untied-unaligned",
         strict=True,
