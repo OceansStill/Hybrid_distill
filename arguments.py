@@ -78,6 +78,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument(
+        "--zero_stage",
+        type=int,
+        default=3,
+        choices=[1, 2, 3],
+        help="DeepSpeed ZeRO 并行阶段，train_zero.py 默认使用 stage-3。",
+    )
+    parser.add_argument(
+        "--zero_cpu_offload",
+        action="store_true",
+        help="启用 ZeRO-3 CPU offload，将参数/优化器状态放在 CPU。",
+    )
+    parser.add_argument(
+        "--zero_pin_memory",
+        action="store_true",
+        help="配合 --zero_cpu_offload 使用，开启 pinned memory 提升 H2D 吞吐。",
+    )
+    parser.add_argument(
         "--kl_weight",
         type=float,
         default=1.0,
