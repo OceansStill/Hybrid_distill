@@ -78,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument(
+        "--init_checkpoint",
+        type=str,
+        default=None,
+        help="可选的初始 checkpoint 路径，若提供则直接从该目录加载学生权重。",
+    )
+    parser.add_argument(
         "--zero_stage",
         type=int,
         default=3,
